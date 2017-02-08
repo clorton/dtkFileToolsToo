@@ -9,7 +9,12 @@ import snappy
 import time
 import sys
 
+_NONE = 'NONE'
+_LZ4 = 'LZ4'
+_SNAPPY = 'SNAPPY'
 
+
+# noinspection PyCamelCase
 class uncompressed(object):
 
     @classmethod
@@ -21,7 +26,7 @@ class uncompressed(object):
         return data
 
 
-__engines__ = {'LZ4': lz4, 'SNAPPY': snappy, 'NONE': uncompressed}
+__engines__ = {_LZ4: lz4, _SNAPPY: snappy, _NONE: uncompressed}
 
 
 class _Class:
@@ -53,15 +58,77 @@ class DtkHeader(SerialObject):
         return len(self.__str__())
 
 
-class DtkNodes:
-
+class Chunks(object):
     def __init__(self, dtk_file):
         self._dtk_file = dtk_file
         return
 
+    def __iter__(self):
+        index = 0
+        while index < len(self):
+            yield self[index]
+            index += 1
+
     def __getitem__(self, index):
-        node = self._dtk_file.get_object(index + 1).node
-        return node
+        chunk = self._dtk_file._chunks[index]
+        return chunk
+
+    def __setitem__(self, index, value):
+        self._dtk_file._set_chunk(index, value)
+        return
+
+    def __len__(self):
+        return len(self._dtk_file._chunks)
+
+    def append(self, value):
+        self._dtk_file._chunks.append(value)
+
+
+class Contents(object):
+    def __init__(self, dtk_file):
+        self._dtk_file = dtk_file
+        return
+
+    def __iter__(self):
+        index = 0
+        while index < len(self):
+            yield self[index]
+            index += 1
+
+    def __getitem__(self, index):
+        contents = self._dtk_file._get_contents(index)
+        return contents
+
+    def __setitem__(self, index, value):
+        self._dtk_file._set_contents(index, value)
+        return
+
+    def __len__(self):
+        return len(self._dtk_file._chunks)
+
+
+class Objects(object):
+    def __init__(self, dtk_file, offset=0):
+        self._dtk_file = dtk_file
+        self._offset = offset
+        return
+
+    def __iter__(self):
+        index = 0
+        while index < len(self):
+            yield self[index]
+            index += 1
+
+    def __getitem__(self, index):
+        item = self._dtk_file._get_object(index + self._offset)
+        return item
+
+    def __setitem__(self, index, value):
+        self._dtk_file._set_object(index + self._offset, value)
+        return
+
+    def __len__(self):
+        return len(self._dtk_file._chunks) - self._offset
 
 
 class DtkFile:
@@ -69,54 +136,100 @@ class DtkFile:
     def __init__(self, filename=None):
 
         self.filename = filename
-        self.chunks = []
-        self.nodes = DtkNodes(self)
+        self._chunks = []
+        self.chunks = Chunks(self)
+        self.contents = Contents(self)
+        self.objects = Objects(self)
+        self.nodes = Objects(self, 1)
 
         if filename is not None:
             with open(self.filename, 'rb') as handle:
                 _check_magic(handle)
-                self.header_size, self.header = _read_header(handle)
+                header_size, self.header = _read_header(handle)
 
-                self.scheme = self.header.metadata.engine.upper()
-                if self.scheme not in __engines__:
+                scheme = self.header.metadata.engine.upper()
+                if scheme not in __engines__:
                     raise UserWarning("File's compression engine ('{0}') is unknown.".format(self.header.metadata.engine))
-                self.engine = __engines__[self.scheme]
+                self.engine = __engines__[scheme]
 
-                offset = 4 + 12 + self.header_size  # 'IDTK' + size + header
+                # 'IDTK' + len(size) + len(header)
+                offset = 4 + 12 + header_size
                 for size in self.header.metadata.chunksizes:
                     handle.seek(offset)
                     self.chunks.append(handle.read(size))
                     offset += size
         else:
-            self.scheme = 'LZ4'
-            self.engine = __engines__[self.scheme]
+            self.header = DtkHeader({'metadata': SerialObject({'engine':_LZ4})})
+            self.header.metadata.version = 2
+            self.header.metadata.author = os.environ['USERNAME'] if 'USERNAME' in os.environ else os.environ['USER']
+            self.header.metadata.tool = os.path.basename(__file__)
+            self.header.metadata.engine = _LZ4
+            self.engine = __engines__[self.header.metadata.engine]
 
         return
 
-    @property
-    def chunk_count(self):
-        return len(self.chunks)
+    # Properties
 
     @property
-    def node_count(self):
-        return self.chunk_count - 1
+    def version(self):
+        return self.header.metadata.version
 
-    def _put_chunk(self, data):
-        self.chunks.append(data)
+    @version.setter
+    def version(self, version):
+        self.header.metadata.version = version
+        return
 
-    def _set_chunk(self, data, index):
+    @property
+    def date(self):
+        return self.header.metadata.date
 
-        while self.chunk_count <= index:
-            self.chunks.append('')
+    @property
+    def author(self):
+        return self.header.metadata.author
 
-        self.chunks[index] = data
+    @author.setter
+    def author(self, author):
+        self.header.metadata.author = author
+        return
+
+    @property
+    def tool(self):
+        return self.header.metadata.tool
+
+    @tool.setter
+    def tool(self, tool):
+        self.header.metadata.tool = tool
+        return
+
+    @property
+    def compressed(self):
+        return self.header.metadata.engine.upper() != 'NONE'
+
+    @property
+    def compression_scheme(self):
+        return self.header.metadata.engine
+
+    @compression_scheme.setter
+    def compression_scheme(self, value):
+        self.header.metadata.engine = value.upper()
+        self.engine = __engines__[self.header.metadata.engine]
+        return
+
+    # Helper functions
+
+    def _set_chunk(self, index, data):
+
+        while len(self._chunks) <= index:
+            self._chunks.append('')
+
+        self._chunks[index] = data
 
         return
 
-    def get_contents(self, index):
+    def _get_contents(self, index):
         """ Returns the uncompressed contents of a file chunk """
 
-        contents = self.chunks[index]
+        contents = self._chunks[index]
         try:
             contents = self.engine.decompress(contents)
         except ValueError as err:
@@ -124,29 +237,64 @@ class DtkFile:
 
         return contents
 
-    def get_object(self, index):
+    def _set_contents(self, index, contents):
+
+        data = self.engine.compress(contents)
+        self._set_chunk(index, data)
+
+        return
+
+    def _get_object(self, index):
         """ Returns the data in a chunk as a Python object """
 
-        contents = self.get_contents(index)
+        contents = self._get_contents(index)
         obj = json.loads(contents, object_hook=SerialObject)
 
         return obj
 
-    @property
-    def sim(self):
-        sim = self.get_object(0).simulation
-        return sim
+    def set_object(self, index, obj):
 
-    @sim.setter
-    def sim(self, value):
+        text = json.dumps(obj, separators=(',', ':'))
+        self._set_contents(index, text)
+
+    @property
+    def simulation(self):
+        simulation = self._get_object(0)
+        return simulation
+
+    @simulation.setter
+    def simulation(self, value):
 
         text = json.dumps(value, separators=(',', ':'))
         # TODO - what if len(text) > length engine can handle?
         data = self.engine.compress(text)
-        self._set_chunk(data, 0)
+        self._set_chunk(0, data)
 
         return
 
+    def write(self, filename):
+
+        self._sync_header()
+
+        with open(filename, 'wb') as handle:
+            _write_magic_number(handle)
+            _write_header_size(len(str(self.header)), handle)
+            _write_header(str(self.header), handle)
+            _write_chunks(self._chunks, handle)
+
+        return
+
+    def _sync_header(self):
+
+        metadata = self.header.metadata
+        metadata.date = time.strftime('%a %b %d %H:%M:%S %Y')
+        metadata.bytecount = reduce(lambda acc, chunk: acc + len(chunk), self.chunks, 0)
+        metadata.chunkcount = len(self.chunks)
+        metadata.chunksizes = [len(chunk) for chunk in self.chunks]
+
+        return
+
+# Read helper functions
 
 def _check_magic(handle):
 
@@ -237,17 +385,17 @@ def __do_read__(commandline_arguments):
 
     print('File metadata: {0}'.format(dtk_file.header.metadata))
 
-    for index in range(dtk_file.chunk_count):
+    for index in range(len(dtk_file.chunks)):
         if commandline_arguments.raw:
             # Write raw chunks to disk
             output = dtk_file.chunks[index]
         else:
             if commandline_arguments.unformatted:
                 # Expand compressed contents, but don't serialize and format
-                output = dtk_file.get_contents(index)
+                output = dtk_file.contents[index]
             else:
                 # Expand compressed contents, serialize, write out formatted
-                obj = dtk_file.get_object(index)
+                obj = dtk_file.objects[index]
                 output = json.dumps(obj, indent=2, separators=(',', ':'))
 
         if index == 0:
@@ -272,70 +420,43 @@ def __do_write__(args):
     print("{0} contents".format("Verifying" if args.verify else "Not verifying"), file=sys.stderr)
     print("Using compression engine '{0}'".format(args.engine), file=sys.stderr)
 
-    scheme = args.engine.upper()
-    engine = __engines__[scheme]
+    dtk_file = DtkFile()
+    dtk_file.author = args.author
+    dtk_file.tool = args.tool
+    dtk_file.compression_scheme = args.engine
 
-    chunks = []
-    _prepare_simulation_data(args.simulation, engine, chunks)
-    _prepare_node_data(args.nodes, engine, chunks)
+    _prepare_simulation_data(args.simulation, dtk_file)
+    _prepare_node_data(args.nodes, dtk_file)
 
-    header = _construct_header(args.author, args.tool, args.engine, chunks)
-    # header_string = json.dumps(header, indent=None, separators=(',', ':'))
-
-    with open(args.filename, 'wb') as handle:
-        _write_magic_number(handle)
-        # _write_header_size(len(header_string), handle)
-        # _write_header(header_string, handle)
-        _write_header_size(len(str(header)), handle)
-        _write_header(str(header), handle)
-        _write_chunks(chunks, handle)
+    dtk_file.write(args.filename)
 
     return
 
 
-def _prepare_simulation_data(filename, engine, chunks):
+def _prepare_simulation_data(filename, dtk_file):
 
     with open(filename, 'rb') as handle:
         data = handle.read()
-    _prepare_chunk(data, engine, chunks)
+        # Do not use dtk_file.simulation property because this is text rather than a Python object
+        dtk_file.contents[0] = data
 
     return
 
 
-def _prepare_chunk(data, engine, chunks):
+def _prepare_node_data(filenames, dtk_file):
 
-    data = engine.compress(data)
-    chunks.append(data)
-
-    return
-
-
-def _prepare_node_data(filenames, engine, chunks):
-
+    index = 1
     for filename in filenames:
         with open(filename, 'rb') as handle:
             data = handle.read()
-        _prepare_chunk(data, engine, chunks)
+            # Do not use dtk_file.nodes here because this is text rather than a Python object
+            dtk_file.contents[index] = data
+            index += 1
 
     return
 
 
-def _construct_header(author, tool, engine, chunks):
-
-    header = DtkHeader()
-    metadata = header.metadata = SerialObject({})
-    metadata.version = 2
-    metadata.date = time.strftime('%a %b %d %H:%M:%S %Y')
-    metadata.author = author if author is not None else "unknown"
-    metadata.tool = tool if tool is not None else "unknown"
-    metadata.compressed = True if engine in __engines__ and __engines__[engine] is not uncompressed else False
-    metadata.engine = engine if metadata.compressed else "NONE"
-    metadata.bytecount = reduce(lambda acc, chunk: acc + len(chunk), chunks, 0)
-    metadata.chunkcount = len(chunks)
-    metadata.chunksizes = [len(c) for c in chunks]
-
-    return header
-
+# Write helper functions
 
 def _write_magic_number(handle):
 
