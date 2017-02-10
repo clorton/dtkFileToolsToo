@@ -252,7 +252,7 @@ class DtkFile:
 
         return obj
 
-    def set_object(self, index, obj):
+    def _set_object(self, index, obj):
 
         text = json.dumps(obj, separators=(',', ':'))
         self._set_contents(index, text)
